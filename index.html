@@ -200,7 +200,16 @@ function parseCSV(text) {
   const lines = text.trim().split('\n');
   const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim());
   return lines.slice(1).map(line => {
-    const vals = line.match(/(".*?"|[^,]+|(?<=,)(?=,)|^(?=,)|(?<=,)$)/g) || [];
+    // Handle quoted fields properly
+    const vals = [];
+    let current = '';
+    let inQuotes = false;
+    for(let i = 0; i < line.length; i++) {
+      if(line[i] === '"') { inQuotes = !inQuotes; }
+      else if(line[i] === ',' && !inQuotes) { vals.push(current.trim()); current = ''; }
+      else { current += line[i]; }
+    }
+    vals.push(current.trim());
     const row = {};
     headers.forEach((h,i) => { row[h] = (vals[i]||'').replace(/"/g,'').trim(); });
     return row;
@@ -256,21 +265,22 @@ async function loadDashboard() {
       return d > max ? d : max;
     }, '');
 
-    // Get all PO numbers that have already shipped
-    const shippedPOs = new Set(shippedRows.map(r => (r['PO Number'] || '').trim()));
+    // Get all PO numbers that have already shipped — normalize to string
+    const shippedPOs = new Set(shippedRows.map(r => String(r['PO Number'] || '').trim()));
 
     // Filter open orders to most recent snapshot AND future/today delivery dates AND not already shipped
-    const today = new Date().toISOString().substring(0, 10);
+    const today = new Date(); today.setHours(0,0,0,0);
     const currentOrders = latestOrderDate
-      ? orderRows.filter(r => 
-          (r['Last Updated'] || '').trim().substring(0, 10) === latestOrderDate && 
-          (r['Delivery Date'] || '') >= today &&
-          !shippedPOs.has((r['PO Number'] || '').trim())
-        )
-      : orderRows.filter(r => 
-          (r['Delivery Date'] || '') >= today &&
-          !shippedPOs.has((r['PO Number'] || '').trim())
-        );
+      ? orderRows.filter(r => {
+          const delDate = new Date(r['Delivery Date'] || '');
+          const notShipped = !shippedPOs.has(String(r['PO Number'] || '').trim());
+          const isLatest = (r['Last Updated'] || '').trim().substring(0,10) === latestOrderDate;
+          return isLatest && notShipped && !isNaN(delDate) && delDate >= today;
+        })
+      : orderRows.filter(r => {
+          const delDate = new Date(r['Delivery Date'] || '');
+          return !isNaN(delDate) && delDate >= today && !shippedPOs.has(String(r['PO Number'] || '').trim());
+        });
 
     // Aggregate committed from open orders
     const COMMITTED = {};
@@ -283,7 +293,17 @@ async function loadDashboard() {
       COMMITTED['F-CBCSDSML-S'] += parseInt(r['SM Sourdough']||0);
     });
 
-    // If sheet is empty, fall back to last known data
+    // DEBUG — show exactly what we computed
+    console.log('=== DASHBOARD DEBUG ===');
+    console.log('Latest inv date:', latestDate);
+    console.log('Latest order date:', latestOrderDate);
+    console.log('Current inv rows:', currentInv.length);
+    console.log('Current orders (unshipped, upcoming):', currentOrders.length);
+    console.log('Shipped POs:', [...shippedPOs]);
+    currentOrders.forEach(r => console.log('  Open PO:', r['PO Number'], r['Region'], r['Delivery Date']));
+    console.log('ON_HAND:', ON_HAND);
+    console.log('COMMITTED:', COMMITTED);
+    console.log('======================');
     const hasInv = currentInv.length > 0;
     if(!hasInv) {
       ON_HAND['F-CBCCIAB-BX']=750; ON_HAND['F-CBCPRE-BX']=200;
